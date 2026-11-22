@@ -429,6 +429,103 @@
   const gravelPat = wctx.createPattern(makeGravelTile(), 'repeat');
 
   /* =========================================================
+     Следы от покрышек (с затуханием)
+     ========================================================= */
+  const SKID_LIFE = 30;
+  const SKID_BIN = 10;
+  const skids = [];
+  let gameTime = 0;
+  const SKID_BIN_SZ = SKID_LIFE / SKID_BIN;
+
+  function addSkid(x1, y1, x2, y2, a, now) {
+    skids.push({ x1, y1, x2, y2, a, born: now });
+  }
+
+  function updateSkids() {
+    const slip = Math.abs(car.slip);
+    const marking = car.onTrack && car.speed > 60 &&
+      Math.abs(car.lat) < TRACK.half + 6 &&
+      (slip > 0.17 || (input.handbrake && car.speed > 40));
+    const wheels = rearWheels();
+
+    for (let i = 0; i < 2; i++) {
+      if (!marking) {
+        car.wheelPrev[i] = null;
+        continue;
+      }
+      const w = wheels[i];
+      const prev = car.wheelPrev[i];
+      if (prev) {
+        const d = Math.hypot(w.x - prev.x, w.y - prev.y);
+        if (d > 0.4 && d < 42) {
+          const a = 0.22 + Math.min(0.28, slip * 0.35);
+          addSkid(prev.x, prev.y, w.x, w.y, a, gameTime);
+        }
+      }
+      car.wheelPrev[i] = { x: w.x, y: w.y };
+    }
+  }
+
+  function drawSkids(g, camX, camY, hw, hh) {
+    const now = gameTime;
+    const cullL = camX - hw - 30;
+    const cullR = camX + hw + 30;
+    const cullT = camY - hh - 30;
+    const cullB = camY + hh + 30;
+
+    // Удаляем просроченные сегменты (массив упорядочен по born)
+    let first = 0;
+    while (first < skids.length && (now - skids[first].born) > SKID_LIFE) first++;
+    if (first > 0) {
+      skids.splice(0, first);
+      if (!skids.length) return;
+    }
+
+    // Группируем по возрастным корзинам, накапливаем среднюю интенсивность
+    const counts = new Uint16Array(SKID_BIN);
+    const alphaSums = new Float64Array(SKID_BIN);
+    const last = skids.length - 1;
+    for (let i = 0; i <= last; i++) {
+      const s = skids[i];
+      const age = now - s.born;
+      if (age > SKID_LIFE) continue;
+      const mx = (s.x1 + s.x2) * 0.5;
+      const my = (s.y1 + s.y2) * 0.5;
+      if (mx < cullL || mx > cullR || my < cullT || my > cullB) continue;
+      const b = Math.min(Math.floor(age / SKID_BIN_SZ), SKID_BIN - 1);
+      counts[b]++;
+      alphaSums[b] += s.a;
+    }
+
+    // Рисуем корзины
+    g.lineCap = 'round';
+    g.lineWidth = 7;
+    for (let b = 0; b < SKID_BIN; b++) {
+      if (counts[b] === 0) continue;
+      const age = b * SKID_BIN_SZ;
+      const fade = 1 - age / SKID_LIFE;
+      const avgA = alphaSums[b] / counts[b];
+      g.globalAlpha = avgA * fade;
+      g.strokeStyle = '#121214';
+      g.beginPath();
+      for (let i = 0; i <= last; i++) {
+        const s = skids[i];
+        const age = now - s.born;
+        if (age > SKID_LIFE) continue;
+        const mx = (s.x1 + s.x2) * 0.5;
+        const my = (s.y1 + s.y2) * 0.5;
+        if (mx < cullL || mx > cullR || my < cullT || my > cullB) continue;
+        const bb = Math.min(Math.floor(age / SKID_BIN_SZ), SKID_BIN - 1);
+        if (bb !== b) continue;
+        g.moveTo(s.x1, s.y1);
+        g.lineTo(s.x2, s.y2);
+      }
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
+
+  /* =========================================================
      Статичный мир (трасса, бордюры, стены, декорации)
      ========================================================= */
   function drawStartLine(g) {
@@ -1124,37 +1221,6 @@
     g.globalAlpha = 1;
   }
 
-  function updateSkids() {
-    const slip = Math.abs(car.slip);
-    const marking = car.onTrack && car.speed > 60 &&
-      Math.abs(car.lat) < TRACK.half + 6 &&
-      (slip > 0.17 || (input.handbrake && car.speed > 40));
-    const wheels = rearWheels();
-
-    for (let i = 0; i < 2; i++) {
-      if (!marking) {
-        car.wheelPrev[i] = null;
-        continue;
-      }
-      const w = wheels[i];
-      const prev = car.wheelPrev[i];
-      if (prev) {
-        const d = Math.hypot(w.x - prev.x, w.y - prev.y);
-        if (d > 0.4 && d < 42) {
-          const a = 0.22 + Math.min(0.28, slip * 0.35);
-          wctx.strokeStyle = 'rgba(16,16,18,' + a.toFixed(3) + ')';
-          wctx.lineWidth = 7;
-          wctx.lineCap = 'round';
-          wctx.beginPath();
-          wctx.moveTo(prev.x, prev.y);
-          wctx.lineTo(w.x, w.y);
-          wctx.stroke();
-        }
-      }
-      car.wheelPrev[i] = { x: w.x, y: w.y };
-    }
-  }
-
   /* =========================================================
      Отрисовка машины
      ========================================================= */
@@ -1316,6 +1382,7 @@
     ctx.fillRect(cam.x - hw - 60, cam.y - hh - 60, hw * 2 + 120, hh * 2 + 120);
 
     ctx.drawImage(world, 0, 0);
+    drawSkids(ctx, cam.x, cam.y, hw, hh);
     drawParticles(ctx);
     drawCar(ctx);
     ctx.restore();
@@ -1360,9 +1427,8 @@
     particles.length = 0;
     smokeAcc = 0;
     dustAcc = 0;
-
-    // Очищаем следы, перестраивая слой мира
-    buildWorld();
+    skids.length = 0;
+    gameTime = 0;
 
     cam.x = car.x;
     cam.y = car.y;
@@ -1437,6 +1503,7 @@
     }
     if (steps === 8) acc = 0;
 
+    gameTime += dt;
     updateScoring(dt);
     updateParticles(dt);
     updateSkids();
