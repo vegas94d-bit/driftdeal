@@ -226,9 +226,10 @@
   const WORLD_W = 3700;
   const WORLD_H = 2300;
   const N_PTS = 900;
+  const START_INDEX = Math.floor(N_PTS * 0.25);
   const TRACK = {
     cx: 1850, cy: 1150, rx: 950, ry: 580,
-    half: 84, runoff: 64, pts: [], length: 0, path: null
+    half: 100, runoff: 64, pts: [], length: 0, path: null
   };
 
   function buildTrack() {
@@ -431,7 +432,7 @@
      Статичный мир (трасса, бордюры, стены, декорации)
      ========================================================= */
   function drawStartLine(g) {
-    const p = TRACK.pts[0];
+    const p = TRACK.pts[START_INDEX];
     g.save();
     g.translate(p.x, p.y);
     g.rotate(p.angle);
@@ -991,18 +992,18 @@
       const ny = loc.p.ny * side;
       const vn = car.vx * nx + car.vy * ny;
       if (vn > 0) {
-        car.vx -= 1.4 * vn * nx;
-        car.vy -= 1.4 * vn * ny;
-      }
-      car.vx *= 0.65;
-      car.vy *= 0.65;
-      car.w *= 0.35;
-      if (car.hitCd <= 0 && vn > 30) {
-        car.hitCd = 0.6;
-        game.shake = Math.max(game.shake, 16);
-        flashScreen();
-        const lost = burnBank('wall');
-        if (lost < 1) showToast('УДАР О СТЕНУ', 'bad');
+        car.vx -= 1.35 * vn * nx;
+        car.vy -= 1.35 * vn * ny;
+        if (car.hitCd <= 0 && vn > 30) {
+          car.hitCd = 0.6;
+          car.vx *= 0.72;
+          car.vy *= 0.72;
+          car.w *= 0.35;
+          game.shake = Math.max(game.shake, 16);
+          flashScreen();
+          const lost = burnBank('wall');
+          if (lost < 1) showToast('УДАР О СТЕНУ', 'bad');
+        }
       }
       car.lat = side * wallLimit;
     }
@@ -1322,7 +1323,7 @@
 
   function resetGame() {
     const N = TRACK.pts.length;
-    const idx = (N - 40) % N;
+    const idx = (START_INDEX - 40 + N) % N;
     const p = TRACK.pts[idx];
 
     car.x = p.x;
