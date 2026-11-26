@@ -74,17 +74,18 @@ function applyTire(axleX, steerAngle, grip, mu, isRear, dt){
     const rawSide=-vSide*grip*massShare;
     const maxSide=mu*massShare*9.81;
     const sideForce=clamp(rawSide,-maxSide,maxSide);
-    carBody.applyForce(side.mul(sideForce),worldPoint,true);
+    // pl.Vec2.mul returns a new vector; instance .mul() mutates its operand in place.
+    carBody.applyForce(pl.Vec2.mul(side,sideForce),worldPoint,true);
     if(isRear && throttle!==0){
       const drive=throttle*CONFIG.engineForce/2;
-      carBody.applyForce(forward.mul(drive),worldPoint,true);
+      carBody.applyForce(pl.Vec2.mul(forward,drive),worldPoint,true);
     }
     if(brake>0){
       const braking=clamp(-vLong*massShare*12,-CONFIG.brakeForce/2,CONFIG.brakeForce/2)*brake;
-      carBody.applyForce(forward.mul(braking),worldPoint,true);
+      carBody.applyForce(pl.Vec2.mul(forward,braking),worldPoint,true);
     }
     // Small rolling drag at each contact.
-    carBody.applyForce(forward.mul(-vLong*CONFIG.rollingDrag/4),worldPoint,true);
+    carBody.applyForce(pl.Vec2.mul(forward,-vLong*CONFIG.rollingDrag/4),worldPoint,true);
   }
 }
 function updatePhysics(dt){
@@ -92,7 +93,8 @@ function updatePhysics(dt){
   brake=(keys.has('KeyS')||keys.has('ArrowDown'))?1:0;
   handbrake=keys.has('Space');
   const left=keys.has('KeyA')||keys.has('ArrowLeft'), right=keys.has('KeyD')||keys.has('ArrowRight');
-  const steerInput=(right?1:0)-(left?1:0);
+  // Positive steer = positive body angle = counterclockwise = left on screen.
+  const steerInput=(left?1:0)-(right?1:0);
   const speed=carBody.getLinearVelocity().length();
   const steerLimit=CONFIG.maxSteer/(1+speed*0.035);
   const target=steerInput*steerLimit;
