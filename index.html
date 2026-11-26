@@ -23,7 +23,7 @@
     margin:0;overflow:hidden;background:var(--bg);color:var(--text);
     font-family:var(--sans);user-select:none;-webkit-user-select:none;
   }
-  #game{position:fixed;inset:0;display:block;width:100%;height:100%;background:var(--bg)}
+  #game{position:fixed;inset:0;display:block;width:100%;height:100%;background:var(--bg);image-rendering:pixelated;image-rendering:crisp-edges}
   #vignette{
     position:fixed;inset:0;z-index:1;pointer-events:none;
     background:radial-gradient(ellipse at center,transparent 52%,rgba(0,0,0,.55) 100%);
@@ -209,6 +209,13 @@
   const fmt = (n) => Math.round(n).toLocaleString('ru-RU');
   const normAng = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 
+  // Magic Formula Pacejka: боковая сила шины как функция угла скольжения x (rad).
+  // Линейна при малых x (цепкость), насыщается на пике D (срыв в занос).
+  const tireForce = (x, B, C, D, E) => {
+    const Bx = B * x;
+    return D * Math.sin(C * Math.atan(Bx - E * (Bx - Math.atan(Bx))));
+  };
+
   function mulberry32(seed) {
     let a = seed >>> 0;
     return function () {
@@ -228,18 +235,20 @@
   const N_PTS = 900;
   const START_INDEX = Math.floor(N_PTS * 0.25);
   const TRACK = {
-    cx: 1850, cy: 1150, rx: 950, ry: 580,
+    cx: 1850, cy: 1150, rx: 1250, ry: 700,
     half: 100, runoff: 64, pts: [], length: 0, path: null
   };
 
   function buildTrack() {
     const pts = [];
+    // Кольцевой проезд парковки — скруглённый прямоугольник (суперэллипс)
+    const n = 4.2;
     for (let i = 0; i < N_PTS; i++) {
       const t = (i / N_PTS) * TAU;
-      const r = 1 + 0.03 * Math.sin(3 * t + 0.7) + 0.015 * Math.cos(2 * t - 0.5);
+      const ct = Math.cos(t), st = Math.sin(t);
       pts.push({
-        x: TRACK.cx + TRACK.rx * r * Math.cos(t),
-        y: TRACK.cy + TRACK.ry * r * Math.sin(t)
+        x: TRACK.cx + TRACK.rx * sgn(ct) * Math.pow(Math.abs(ct), 2 / n),
+        y: TRACK.cy + TRACK.ry * sgn(st) * Math.pow(Math.abs(st), 2 / n)
       });
     }
     for (let i = 0; i < N_PTS; i++) {
@@ -324,53 +333,47 @@
 
   const cam = { x: TRACK.cx, y: TRACK.cy };
   const PHYS = {
-    ENGINE: 720,
-    MAX_SPEED: 900,
-    BRAKE: 1300,
-    REVERSE: 470,
-    MAX_REVERSE: 240,
-    DRAG: 0.14,
-    ROLL: 14,
-    HB_BRAKE: 50,
-    GRIP: 13,
-    GRIP_HB: 2.0,
-    GRIP_RATE: 4.5,
-    GRIP_RATE_HB: 16,
-    POWER_GRIP: 0.55,
-    YAW_MAX: 2.2,
-    YAW_HB: 1.15,
-    YAW_RESPONSE: 9,
-    MAX_YAW: 3.0,
-    ALIGN: 3.0,
-    ALIGN_HB: 0.8,
-    SLIP_LIMIT: 0.62,
-    STEER_RATE: 5.5,
-    STEER_RETURN: 8
+    ENGINE: 720, MAX_SPEED: 900, BRAKE: 1300, REVERSE: 470, MAX_REVERSE: 240,
+    DRAG: 0.14, ROLL: 14, HB_BRAKE: 50,
+    STEER_MAX: 0.55, STEER_RATE: 5.5, STEER_RETURN: 8,
+    // Двухосевая bicycle-модель. Боковые силы на каждой оси считаются
+    // отдельно по Magic Formula Pacejka, а рыскание рождается их моментом:
+    //   yawAcc = (AF*FyF - AR*FyR) / IZ
+    // Пик задней оси (REAR.D) ниже переднего, поэтому машина избыточно
+    // поворачиваемая: занос возникает рулём и газом, а ручник лишь
+    // обрушает его мгновенно. Сила трения задается как ускорение (масса = 1).
+    AF: 15, AR: 14, IZ: 500, SUB: 4,
+    FRONT: { B: 6.0, C: 1.8, D: 1600, E: 0.3 },
+    REAR: { B: 5.7, C: 1.8, D: 900, E: 0.3 },
+    REAR_HB: { B: 1.8, C: 1.5, D: 430, E: 0.1 },
+    OFF: { B: 3.2, C: 1.4, D: 900, E: 0.3 },
+    GRIP_SPEED: 120, YAW_DAMP: 1.5, MAX_YAW: 3.4
   };
 
-  function makeGrassTile() {
+  /* =========================================================
+     Текстуры покрытий (ночная японская парковка)
+     ========================================================= */
+  function makeConcreteTile() {
     const c = document.createElement('canvas');
-    c.width = c.height = 160;
+    c.width = c.height = 128;
     const g = c.getContext('2d');
-    g.fillStyle = '#1d3425';
-    g.fillRect(0, 0, 160, 160);
+    g.fillStyle = '#40454d';
+    g.fillRect(0, 0, 128, 128);
     const r = mulberry32(11);
-    for (let i = 0; i < 900; i++) {
+    for (let i = 0; i < 1200; i++) {
       const v = r();
-      g.fillStyle = v < 0.5 ? 'rgba(46,78,53,.55)'
-        : v < 0.8 ? 'rgba(16,38,24,.6)'
-        : 'rgba(72,108,72,.32)';
-      g.fillRect(r() * 160, r() * 160, 1.2, 1.2);
+      g.fillStyle = v < 0.5 ? 'rgba(255,255,255,.028)'
+        : v < 0.82 ? 'rgba(0,0,0,.05)'
+        : 'rgba(150,170,190,.04)';
+      g.fillRect(r() * 128, r() * 128, 1.3, 1.3);
     }
-    for (let i = 0; i < 130; i++) {
-      const x = r() * 160, y = r() * 160;
-      g.strokeStyle = 'rgba(58,96,62,.35)';
-      g.lineWidth = 1;
-      g.beginPath();
-      g.moveTo(x, y);
-      g.lineTo(x + (r() - 0.5) * 3, y - 2 - r() * 3);
-      g.stroke();
-    }
+    // Швы бетонных плит
+    g.strokeStyle = 'rgba(12,15,18,.28)';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(0, 64); g.lineTo(128, 64);
+    g.moveTo(64, 0); g.lineTo(64, 128);
+    g.stroke();
     return c;
   }
 
@@ -378,7 +381,7 @@
     const c = document.createElement('canvas');
     c.width = c.height = 128;
     const g = c.getContext('2d');
-    g.fillStyle = '#3b3f46';
+    g.fillStyle = '#2e3239';
     g.fillRect(0, 0, 128, 128);
     const r = mulberry32(23);
     for (let i = 0; i < 850; i++) {
@@ -386,21 +389,7 @@
       g.fillStyle = v < 0.55 ? 'rgba(255,255,255,.035)'
         : v < 0.85 ? 'rgba(0,0,0,.06)'
         : 'rgba(150,160,170,.05)';
-      const s = r() < 0.9 ? 1 : 2;
-      g.fillRect(r() * 128, r() * 128, s, s);
-    }
-    g.strokeStyle = 'rgba(20,22,26,.22)';
-    g.lineWidth = 1;
-    for (let i = 0; i < 4; i++) {
-      let x = r() * 128, y = r() * 128;
-      g.beginPath();
-      g.moveTo(x, y);
-      for (let j = 0; j < 4; j++) {
-        x += r() * 20 - 10;
-        y += r() * 20 - 10;
-        g.lineTo(x, y);
-      }
-      g.stroke();
+      g.fillRect(r() * 128, r() * 128, 1.5, 1.5);
     }
     return c;
   }
@@ -409,14 +398,14 @@
     const c = document.createElement('canvas');
     c.width = c.height = 96;
     const g = c.getContext('2d');
-    g.fillStyle = '#6b6253';
+    g.fillStyle = '#4a4640';
     g.fillRect(0, 0, 96, 96);
     const r = mulberry32(37);
     for (let i = 0; i < 700; i++) {
       const v = r();
-      g.fillStyle = v < 0.4 ? 'rgba(143,132,111,.5)'
-        : v < 0.75 ? 'rgba(80,73,60,.6)'
-        : 'rgba(190,180,158,.25)';
+      g.fillStyle = v < 0.4 ? 'rgba(130,120,100,.5)'
+        : v < 0.75 ? 'rgba(70,63,50,.6)'
+        : 'rgba(170,160,130,.25)';
       g.beginPath();
       g.arc(r() * 96, r() * 96, 1 + r() * 2, 0, TAU);
       g.fill();
@@ -424,7 +413,7 @@
     return c;
   }
 
-  const grassPat = ctx.createPattern(makeGrassTile(), 'repeat');
+  const lotPat = wctx.createPattern(makeConcreteTile(), 'repeat');
   const asphaltPat = wctx.createPattern(makeAsphaltTile(), 'repeat');
   const gravelPat = wctx.createPattern(makeGravelTile(), 'repeat');
 
@@ -528,6 +517,7 @@
   /* =========================================================
      Статичный мир (трасса, бордюры, стены, декорации)
      ========================================================= */
+  // Освещённый въезд/финиш: шашечки + направляющие шевроны
   function drawStartLine(g) {
     const p = TRACK.pts[START_INDEX];
     g.save();
@@ -538,38 +528,64 @@
     const ch = (TRACK.half * 2) / cols;
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
-        g.fillStyle = (i + j) % 2 ? '#ececec' : '#191b1f';
+        g.fillStyle = (i + j) % 2 ? '#e7ebef' : '#14171b';
         g.fillRect(-cw + i * cw, -TRACK.half + j * ch, cw, ch);
       }
     }
-    g.fillStyle = 'rgba(255,255,255,.12)';
-    g.fillRect(-cw - 3, -TRACK.half, 2, TRACK.half * 2);
-    g.fillRect(cw + 1, -TRACK.half, 2, TRACK.half * 2);
-    g.fillStyle = 'rgba(255,255,255,.14)';
+    // Направляющие шевроны на асфальте перед въездом
+    g.fillStyle = 'rgba(231,235,239,.5)';
+    for (let k = 0; k < 3; k++) {
+      const x = -cw - 18 - k * 16;
+      g.beginPath();
+      g.moveTo(x, -TRACK.half + 8);
+      g.lineTo(x - 10, 0);
+      g.lineTo(x, TRACK.half - 8);
+      g.lineTo(x + 4, TRACK.half - 8);
+      g.lineTo(x - 6, 0);
+      g.lineTo(x + 4, -TRACK.half + 8);
+      g.closePath();
+      g.fill();
+    }
+    g.fillStyle = 'rgba(231,235,239,.16)';
     g.font = '700 22px "Segoe UI", sans-serif';
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    g.fillText('D R I F T   D E A L', -155, 0);
+    g.fillText('D A I K O K U   P A', -150, 0);
     g.restore();
   }
 
+  // Бетонные отбойники по периметру проезда (barrier)
   function drawWalls(g) {
     const off = TRACK.half + TRACK.runoff;
     for (const side of [1, -1]) {
       const path = makePath(off * side);
       g.setLineDash([]);
-      g.strokeStyle = 'rgba(0,0,0,.3)';
-      g.lineWidth = 26;
+      // Тень под барьером
+      g.strokeStyle = 'rgba(0,0,0,.4)';
+      g.lineWidth = 24;
       g.stroke(path);
-      g.strokeStyle = '#0c1014';
-      g.lineWidth = 14;
+      // Бетонное тело
+      g.strokeStyle = '#565b62';
+      g.lineWidth = 16;
       g.stroke(path);
-      g.strokeStyle = '#2a323a';
-      g.lineWidth = 9;
+      // Светлая грань сверху
+      g.strokeStyle = '#6c7178';
+      g.lineWidth = 7;
       g.stroke(path);
-      g.strokeStyle = 'rgba(160,180,195,.22)';
-      g.lineWidth = 2;
-      g.stroke(path);
+      // Тёмная подошва
+      g.strokeStyle = 'rgba(20,24,28,.7)';
+      g.lineWidth = 3;
+      g.stroke(makePath((off - 8) * side));
+      // Жёлто-чёрные предупредительные шевроны
+      g.setLineDash([18, 18]);
+      g.strokeStyle = 'rgba(242,193,78,.85)';
+      g.lineWidth = 5;
+      g.stroke(makePath((off + 5) * side));
+      g.lineDashOffset = 18;
+      g.strokeStyle = 'rgba(20,22,26,.85)';
+      g.stroke(makePath((off + 5) * side));
+      g.setLineDash([]);
+      g.lineDashOffset = 0;
     }
   }
 
@@ -585,63 +601,284 @@
     return Math.sqrt(best);
   }
 
-  function drawTree(g, x, y, s, r) {
-    const rad = 13 + 18 * s;
-    g.fillStyle = 'rgba(0,0,0,.24)';
+  // Ночная сакура: тёмно-розовая крона, подсветка снизу
+  function drawSakura(g, x, y, s, r) {
+    const rad = 14 + 17 * s;
+    g.fillStyle = 'rgba(0,0,0,.3)';
     g.beginPath();
-    g.ellipse(x + rad * 0.55, y + rad * 0.62, rad * 1.05, rad * 0.55, 0, 0, TAU);
+    g.ellipse(x + rad * 0.5, y + rad * 0.6, rad, rad * 0.5, 0, 0, TAU);
     g.fill();
-    g.fillStyle = '#3a2b1e';
-    g.fillRect(x - 2 * s, y, 4 * s, rad * 0.9);
-    const shades = ['#16331f', '#1d4028', '#255031', '#2d5f39'];
+    g.strokeStyle = '#2c2026';
+    g.lineWidth = 3 * s;
+    g.beginPath();
+    g.moveTo(x, y + rad * 0.5);
+    g.lineTo(x, y - rad * 0.3);
+    g.stroke();
+    const shades = ['#4a2a3c', '#5e3549', '#74455b'];
     for (let i = 0; i < 3; i++) {
       g.fillStyle = shades[i];
       g.beginPath();
-      g.arc(
-        x + (r() - 0.5) * rad * 0.7,
-        y - rad * 0.2 + (r() - 0.5) * rad * 0.5,
-        rad * (1 - i * 0.18),
-        0, TAU
-      );
+      g.arc(x + (r() - 0.5) * rad * 0.6, y - rad * 0.35 + (r() - 0.5) * rad * 0.4,
+        rad * (1 - i * 0.16), 0, TAU);
       g.fill();
     }
-    g.fillStyle = 'rgba(120,190,120,.16)';
-    g.beginPath();
-    g.arc(x - rad * 0.25, y - rad * 0.55, rad * 0.35, 0, TAU);
-    g.fill();
+    // Одиночные лепестки-блики
+    g.fillStyle = 'rgba(233,178,200,.22)';
+    for (let i = 0; i < 5; i++) {
+      g.beginPath();
+      g.arc(x + (r() - 0.5) * rad * 1.4, y - rad * 0.3 + (r() - 0.5) * rad, 1.6, 0, TAU);
+      g.fill();
+    }
   }
 
-  function drawBush(g, x, y, s, r) {
-    const rad = 6 + 9 * s;
-    g.fillStyle = 'rgba(0,0,0,.18)';
+  // Кадка с кустом у бордюра
+  function drawPlanter(g, x, y, s, r) {
+    const rad = 6 + 7 * s;
+    g.fillStyle = 'rgba(0,0,0,.25)';
     g.beginPath();
     g.ellipse(x + 2, y + 3, rad * 1.1, rad * 0.5, 0, 0, TAU);
     g.fill();
+    g.fillStyle = '#3a3630';
+    g.fillRect(x - rad * 0.7, y - 1, rad * 1.4, rad * 0.7);
     for (let i = 0; i < 3; i++) {
-      g.fillStyle = i === 0 ? '#1a3a24' : i === 1 ? '#224a2c' : '#2b5a35';
+      g.fillStyle = i === 0 ? '#233a28' : i === 1 ? '#2c4a31' : '#35593a';
       g.beginPath();
-      g.arc(x + (r() - 0.5) * rad, y + (r() - 0.5) * rad * 0.5, rad * (0.65 + r() * 0.35), 0, TAU);
+      g.arc(x + (r() - 0.5) * rad, y - rad * 0.4 + (r() - 0.5) * rad * 0.4,
+        rad * (0.6 + r() * 0.3), 0, TAU);
       g.fill();
     }
   }
 
+  // Корпус зоны отдыха: тёмный силуэт с рядами тёплых окон и вывеской
+  function drawBuilding(g, x, y, w, h, name) {
+    g.fillStyle = 'rgba(0,0,0,.35)';
+    g.fillRect(x + 8, y + 10, w, h);
+    g.fillStyle = '#1b2026';
+    g.fillRect(x, y, w, h);
+    g.fillStyle = '#242b33';
+    g.fillRect(x, y, w, 10);
+    // Окна
+    const cols = Math.max(3, Math.floor(w / 26));
+    const rows = Math.max(2, Math.floor(h / 26));
+    for (let i = 0; i < cols; i++) {
+      for (let j = 0; j < rows; j++) {
+        const lit = (i * 7 + j * 3) % 4 < 2;
+        g.fillStyle = lit ? 'rgba(255,214,150,.55)' : 'rgba(120,150,180,.12)';
+        g.fillRect(x + 12 + i * (w - 24) / cols, y + 16 + j * (h - 24) / rows,
+          Math.min(12, (w - 24) / cols - 6), Math.min(12, (h - 24) / rows - 6));
+      }
+    }
+    if (name) {
+      g.fillStyle = 'rgba(120,200,255,.7)';
+      g.font = '700 16px "Segoe UI", sans-serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(name, x + w / 2, y + 22);
+    }
+  }
+
+  // Ряд торговых автоматов с неоновой подсветкой
+  function drawVendingRow(g, x, y, n) {
+    for (let i = 0; i < n; i++) {
+      const vx = x + i * 20;
+      g.fillStyle = 'rgba(0,0,0,.3)';
+      g.fillRect(vx + 2, y + 3, 16, 26);
+      g.fillStyle = '#10151b';
+      g.fillRect(vx, y, 16, 26);
+      const glow = ['#ff5a5a', '#5ad0ff', '#ffd24a', '#7dff8a'][i % 4];
+      g.fillStyle = glow;
+      g.globalAlpha = 0.8;
+      g.fillRect(vx + 2, y + 2, 12, 14);
+      g.globalAlpha = 0.25;
+      g.beginPath();
+      g.arc(vx + 8, y + 9, 16, 0, TAU);
+      g.fill();
+      g.globalAlpha = 1;
+    }
+  }
+
+  // Припаркованная машина (вид сверху) — плотный ряд на стоянке
+  function drawParkCar(g, x, y, ang, col) {
+    g.save();
+    g.translate(x, y);
+    g.rotate(ang);
+    g.fillStyle = 'rgba(0,0,0,.3)';
+    roundRect(g, -20, -10, 40, 20, 6);
+    g.fill();
+    const grad = g.createLinearGradient(-20, 0, 20, 0);
+    grad.addColorStop(0, col);
+    grad.addColorStop(1, 'rgba(0,0,0,.35)');
+    g.fillStyle = grad;
+    roundRect(g, -19, -9, 38, 18, 5);
+    g.fill();
+    g.fillStyle = 'rgba(150,180,205,.18)';
+    roundRect(g, -7, -6.5, 14, 13, 3);
+    g.fill();
+    g.restore();
+  }
+
+  // Портовый кран — индустриальный силуэт на фоне
+  function drawCrane(g, x, y, s) {
+    g.strokeStyle = '#2b333b';
+    g.lineWidth = 6 * s;
+    g.beginPath();
+    g.moveTo(x, y);
+    g.lineTo(x, y - 150 * s);
+    g.lineTo(x + 130 * s, y - 150 * s);
+    g.moveTo(x, y - 110 * s);
+    g.lineTo(x - 60 * s, y);
+    g.moveTo(x, y - 110 * s);
+    g.lineTo(x + 60 * s, y);
+    g.stroke();
+    g.strokeStyle = '#39434d';
+    g.lineWidth = 3 * s;
+    g.beginPath();
+    g.moveTo(x + 95 * s, y - 150 * s);
+    g.lineTo(x + 95 * s, y - 110 * s);
+    g.stroke();
+    g.fillStyle = 'rgba(255,90,70,.5)';
+    g.fillRect(x - 3, y - 156 * s, 6, 6);
+  }
+
+  // Штабель контейнеров
+  function drawContainers(g, x, y, s) {
+    const cols = ['#7a3b3b', '#3b5a7a', '#6a6a3b', '#3b6a55'];
+    for (let r = 0; r < 2; r++) {
+      for (let c = 0; c < 3; c++) {
+        g.fillStyle = 'rgba(0,0,0,.3)';
+        g.fillRect(x + c * 46 * s + 3, y + r * 26 * s + 3, 42 * s, 22 * s);
+        g.fillStyle = cols[(r + c) % 4];
+        g.fillRect(x + c * 46 * s, y + r * 26 * s, 42 * s, 22 * s);
+        g.strokeStyle = 'rgba(0,0,0,.25)';
+        g.lineWidth = 1;
+        for (let k = 1; k < 5; k++) {
+          g.beginPath();
+          g.moveTo(x + c * 46 * s + k * 8 * s, y + r * 26 * s);
+          g.lineTo(x + c * 46 * s + k * 8 * s, y + r * 26 * s + 22 * s);
+          g.stroke();
+        }
+      }
+    }
+  }
+
+  // Декор снаружи кольца: корпуса по краям, порт снизу, сакура вдоль
   function drawDecor(g) {
     const r = mulberry32(99);
-    let n = 0;
-    for (let i = 0; i < 700 && n < 80; i++) {
-      const x = 40 + r() * (WORLD_W - 80);
-      const y = 40 + r() * (WORLD_H - 80);
-      if (distToTrack(x, y) < TRACK.half + TRACK.runoff + 52) continue;
-      drawTree(g, x, y, 0.7 + r() * 0.75, r);
-      n++;
+    const wall = TRACK.half + TRACK.runoff;
+    // Главное здание — запад, Bayside Terrace — север (по планировке Daikoku PA)
+    drawBuilding(g, 40, 820, 300, 520, 'DAIKOKU PA');
+    drawBuilding(g, 1150, 40, 1250, 170, 'BAYSIDE TERRACE');
+    drawBuilding(g, 3360, 760, 300, 600, 'LAWSON 24H');
+    // Порт и индустриальный задний план — юг
+    drawCrane(g, 760, 2250, 1.1);
+    drawCrane(g, 1500, 2270, 0.9);
+    drawContainers(g, 2100, 2120, 1.1);
+    drawContainers(g, 2700, 2150, 0.9);
+    // Автоматы и кей-кары у главного здания
+    drawVendingRow(g, 360, 1180, 4);
+    const parked = ['#c9d2da', '#2a2f36', '#8a2b2b', '#3a5a8a', '#d8c86a', '#556'];
+    for (let i = 0; i < 5; i++) {
+      drawParkCar(g, 1250 + i * 60, 250, 0, parked[i]);
     }
-    for (let i = 0; i < 400 && n < 130; i++) {
+    // Сакура и кадки вдоль внешнего периметра проезда
+    let n = 0;
+    for (let i = 0; i < 900 && n < 64; i++) {
       const x = 30 + r() * (WORLD_W - 60);
       const y = 30 + r() * (WORLD_H - 60);
-      if (distToTrack(x, y) < TRACK.half + TRACK.runoff + 32) continue;
-      drawBush(g, x, y, 0.6 + r() * 0.8, r);
+      const d = distToTrack(x, y);
+      if (d < wall + 40 || d > wall + 220) continue;
+      drawSakura(g, x, y, 0.7 + r() * 0.7, r);
       n++;
     }
+    n = 0;
+    for (let i = 0; i < 500 && n < 40; i++) {
+      const x = 30 + r() * (WORLD_W - 60);
+      const y = 30 + r() * (WORLD_H - 60);
+      const d = distToTrack(x, y);
+      if (d < wall + 26 || d > wall + 150) continue;
+      drawPlanter(g, x, y, 0.6 + r() * 0.7, r);
+      n++;
+    }
+  }
+
+  // Замкнутый путь по формуле суперэллипса (скруглённый прямоугольник)
+  function superEllipsePath(ax, ay) {
+    const p = new Path2D();
+    const n = 4.2;
+    for (let i = 0; i <= 160; i++) {
+      const t = i / 160 * TAU;
+      const ct = Math.cos(t), st = Math.sin(t);
+      const x = TRACK.cx + ax * sgn(ct) * Math.pow(Math.abs(ct), 2 / n);
+      const y = TRACK.cy + ay * sgn(st) * Math.pow(Math.abs(st), 2 / n);
+      i ? p.lineTo(x, y) : p.moveTo(x, y);
+    }
+    p.closePath();
+    return p;
+  }
+
+  // Центральный остров: парковочные ряды, стрелки, припаркованные кей-кары
+  function drawIsland(g, wall) {
+    const island = superEllipsePath(TRACK.rx - wall - 8, TRACK.ry - wall - 8);
+    g.save();
+    g.clip(island);
+
+    // Парковочные ряды: горизонтальные проезжие + вертикальные штрихи
+    for (let yy = TRACK.cy - TRACK.ry + 50; yy < TRACK.cy + TRACK.ry - 50; yy += 50) {
+      g.fillStyle = 'rgba(231,235,239,.05)';
+      g.fillRect(TRACK.cx - TRACK.rx, yy - 9, TRACK.rx * 2, 18);
+      for (let xx = TRACK.cx - TRACK.rx + 30; xx < TRACK.cx + TRACK.rx - 30; xx += 38) {
+        g.strokeStyle = 'rgba(231,235,239,.22)';
+        g.lineWidth = 1.3;
+        g.beginPath();
+        g.moveTo(xx, yy - 9);
+        g.lineTo(xx, yy + 9);
+        g.stroke();
+      }
+    }
+    // Стрелки направления движения на проезжих полосах
+    for (let yy = TRACK.cy - TRACK.ry + 75; yy < TRACK.cy + TRACK.ry - 50; yy += 100) {
+      for (let xx = TRACK.cx - TRACK.rx + 80; xx < TRACK.cx + TRACK.rx - 80; xx += 140) {
+        g.fillStyle = 'rgba(231,235,239,.25)';
+        g.beginPath();
+        g.moveTo(xx, yy - 5);
+        g.lineTo(xx + 14, yy);
+        g.lineTo(xx, yy + 5);
+        g.lineTo(xx + 4, yy + 5);
+        g.lineTo(xx + 4, yy - 5);
+        g.closePath();
+        g.fill();
+      }
+    }
+    // Припаркованные кей-кары (JDM-атмосфера)
+    const pk = ['#c9d2da', '#2a2f36', '#8a2b2b', '#3a5a8a', '#d8c86a', '#282d32'];
+    for (let i = 0; i < 8; i++) {
+      drawParkCar(g, TRACK.cx - 400 + i * 115, TRACK.cy - 280, 0, pk[i % pk.length]);
+      drawParkCar(g, TRACK.cx - 350 + i * 115, TRACK.cy + 240, Math.PI, pk[(i + 3) % pk.length]);
+    }
+    g.restore();
+  }
+
+  // Световые пятна от фонарных мачт (lighter blend поверх покрытия)
+  function drawLights(g, wall) {
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < N_PTS; i += 45) {
+      const p = TRACK.pts[i];
+      const side = (i / 45) % 2 === 0 ? 1 : -1;
+      const lx = p.x + p.nx * (wall + 18) * side;
+      const ly = p.y + p.ny * (wall + 18) * side;
+      const grd = g.createRadialGradient(lx, ly, 0, lx, ly, 90);
+      grd.addColorStop(0, 'rgba(255,214,150,.18)');
+      grd.addColorStop(1, 'rgba(255,214,150,0)');
+      g.fillStyle = grd;
+      g.fillRect(lx - 90, ly - 90, 180, 180);
+      // Столб фонаря
+      g.fillStyle = '#2a323a';
+      g.beginPath();
+      g.arc(lx, ly, 3, 0, TAU);
+      g.fill();
+    }
+    g.restore();
   }
 
   function buildWorld() {
@@ -651,58 +888,63 @@
     g.lineJoin = 'round';
     g.lineCap = 'round';
 
-    // Гравийная зона вылета
+    const WALL = TRACK.half + TRACK.runoff - 20;
+
+    // Пол всей площадки — бетон
+    g.fillStyle = lotPat;
+    g.fillRect(0, 0, WORLD_W, WORLD_H);
+
+    // Центральный остров: парковочные ряды (клип по внутреннему контуру)
+    drawIsland(g, WALL);
+
+    // Внешний периметр: корпуса, порт, автоматы, сакура
+    drawDecor(g);
+
+    // Кольцевой проезд: асфальтовая обочина, затем асфальт дороги
     g.strokeStyle = gravelPat;
-    g.lineWidth = (TRACK.half + TRACK.runoff) * 2;
+    g.lineWidth = WALL * 2;
     g.stroke(TRACK.path);
-
-    g.strokeStyle = 'rgba(0,0,0,.22)';
-    g.lineWidth = 6;
-    g.stroke(makePath(TRACK.half + TRACK.runoff));
-    g.stroke(makePath(-TRACK.half - TRACK.runoff));
-
-    // Асфальт
     g.strokeStyle = asphaltPat;
     g.lineWidth = TRACK.half * 2;
     g.stroke(TRACK.path);
 
-    // Внутренняя тень кромки
-    g.strokeStyle = 'rgba(0,0,0,.28)';
+    // Тень кромки асфальта
+    g.strokeStyle = 'rgba(0,0,0,.3)';
     g.lineWidth = 3;
     g.stroke(makePath(TRACK.half - 1.5));
     g.stroke(makePath(-TRACK.half + 1.5));
 
-    // Едва заметная осевая разметка
+    // Жёлто-чёрные бордюры по краю асфальта
+    g.setLineDash([18, 18]);
+    g.lineWidth = 4;
+    g.strokeStyle = 'rgba(242,193,78,.7)';
+    g.stroke(makePath(TRACK.half + 3));
+    g.stroke(makePath(-(TRACK.half + 3)));
+    g.lineDashOffset = 18;
+    g.strokeStyle = 'rgba(18,20,24,.75)';
+    g.stroke(makePath(TRACK.half + 3));
+    g.stroke(makePath(-(TRACK.half + 3)));
+    g.setLineDash([]);
+    g.lineDashOffset = 0;
+
+    // Белая сплошная линия края + осевой пунктир
+    g.strokeStyle = 'rgba(231,235,239,.4)';
+    g.lineWidth = 2;
+    g.stroke(makePath(TRACK.half - 9));
+    g.stroke(makePath(-(TRACK.half - 9)));
     g.save();
-    g.strokeStyle = 'rgba(255,255,255,.035)';
+    g.setLineDash([30, 42]);
+    g.strokeStyle = 'rgba(231,235,239,.16)';
     g.lineWidth = 3;
-    g.setLineDash([34, 44]);
     g.stroke(TRACK.path);
     g.restore();
 
-    // Красно-белые поребрики
-    const kerbOff = TRACK.half + 7;
-    const k1 = makePath(kerbOff);
-    const k2 = makePath(-kerbOff);
-    g.setLineDash([]);
-    g.strokeStyle = '#15181c';
-    g.lineWidth = 16;
-    g.stroke(k1);
-    g.stroke(k2);
-    g.strokeStyle = '#ededed';
-    g.lineWidth = 13;
-    g.stroke(k1);
-    g.stroke(k2);
-    g.setLineDash([26, 26]);
-    g.strokeStyle = '#d93a2b';
-    g.lineWidth = 13;
-    g.stroke(k1);
-    g.stroke(k2);
-    g.setLineDash([]);
+    // Свет фонарных мачт поверх покрытия
+    drawLights(g, WALL);
 
-    drawStartLine(g);
+    // Отбойники и въезд — поверх всего наземного
     drawWalls(g);
-    drawDecor(g);
+    drawStartLine(g);
   }
 
   /* =========================================================
@@ -710,7 +952,7 @@
      ========================================================= */
   const car = {
     x: 0, y: 0, angle: 0,
-    vx: 0, vy: 0, w: 0, steer: 0, grip: PHYS.GRIP,
+    vx: 0, vy: 0, w: 0, steer: 0,
     lat: 0, onTrack: true, offTrack: false, lastIdx: 0,
     hitCd: 0, vLong: 0, vLat: 0, slip: 0, speed: 0,
     wheelPrev: [null, null]
@@ -736,7 +978,28 @@
   const input = { throttle: false, brake: false, left: false, right: false, handbrake: false, steer: 0 };
   const keys = new Set();
 
+  // Отладочный автопилот: index.html?demo=1 — машина едет по трассе сама.
+  // Повторяет проверенный в _track.js профиль «полный газ без ручника»:
+  // он даёт устойчивый занос на вписывании и при этом не касается стен.
+  const DEMO = /[?&]demo=1/.test(location.search);
+
+  function demoInput() {
+    const pts = TRACK.pts;
+    const tgt = pts[(car.lastIdx + 30) % pts.length];
+    const err = normAng(Math.atan2(tgt.y - car.y, tgt.x - car.x) - car.angle);
+    input.steer = clamp(err * 3.4 - car.lat / 160, -1, 1);
+    input.left = input.steer < -0.05;
+    input.right = input.steer > 0.05;
+    input.throttle = true;
+    input.brake = false;
+    input.handbrake = false;
+  }
+
   function syncInput() {
+    if (DEMO) {
+      demoInput();
+      return;
+    }
     input.throttle = keys.has('KeyW') || keys.has('ArrowUp');
     input.brake = keys.has('KeyS') || keys.has('ArrowDown');
     input.left = keys.has('KeyA') || keys.has('ArrowLeft');
@@ -978,85 +1241,74 @@
   /* =========================================================
      Физика
      ========================================================= */
-  function stepPhysics(dt) {
+  // Один подшаг покрышковой модели. Покрышки нестабильны на шаге 1/120,
+  // поэтому шаг физики дробится на PHYS.SUB подшагов (эффективно 1/480).
+  function substep(dt, off) {
     const P = PHYS;
-    const throttle = input.throttle;
-    const brake = input.brake;
-    const hb = input.handbrake;
 
-    // Плавный руль
-    const target = input.steer;
-    const rate = target === 0 ? P.STEER_RETURN : P.STEER_RATE;
-    car.steer += clamp(target - car.steer, -rate * dt, rate * dt);
+    const stT = input.steer;
+    const rate = stT === 0 ? P.STEER_RETURN : P.STEER_RATE;
+    car.steer += clamp(stT - car.steer, -rate * dt, rate * dt);
+    const delta = car.steer * P.STEER_MAX;
 
     const ca = Math.cos(car.angle);
     const sa = Math.sin(car.angle);
     let vLong = car.vx * ca + car.vy * sa;
     let vLat = -car.vx * sa + car.vy * ca;
     const speed = Math.hypot(vLong, vLat);
-    const onTrack = car.onTrack;
 
-    // Двигатель / тормоз / задний ход
-    let engine = P.ENGINE;
-    if (!onTrack) engine *= 0.45;
-    if (hb) engine *= 0.35;
-
-    if (throttle) {
+    // Продольная сила: двигатель, тормоз, задний ход, ручник
+    let driveFx = 0;
+    if (input.throttle) {
       if (vLong < -10) {
-        vLong += P.BRAKE * 0.7 * dt;
+        driveFx = P.BRAKE * 0.7;
       } else {
-        vLong += engine * (1 - clamp(vLong / P.MAX_SPEED, 0, 1) * 0.8) * dt;
+        driveFx = P.ENGINE * (1 - clamp(vLong / P.MAX_SPEED, 0, 1) * 0.8) *
+          (off ? 0.45 : 1);
       }
     }
-    if (brake) {
-      if (vLong > 15) vLong -= P.BRAKE * dt;
-      else vLong = Math.max(vLong - P.REVERSE * dt, -P.MAX_REVERSE);
-    }
-    if (hb) vLong -= sgn(vLong) * P.HB_BRAKE * dt;
+    if (input.brake) driveFx = vLong > 15 ? -P.BRAKE : -P.REVERSE;
+    if (input.handbrake) driveFx -= sgn(vLong) * P.HB_BRAKE;
+
+    // Углы скольжения передней и задней осей (передняя повёрнута на delta)
+    const den = Math.max(Math.abs(vLong), 30);
+    const aF = Math.atan2(vLat + car.w * P.AF, den) - delta;
+    const aR = Math.atan2(vLat - car.w * P.AR, den);
+
+    // Сцепление растёт со скоростью (прогрев резины), на грунте ниже
+    const sf = clamp(speed / P.GRIP_SPEED, 0, 1);
+    const tF = off ? P.OFF : P.FRONT;
+    const tR = input.handbrake ? P.REAR_HB : (off ? P.OFF : P.REAR);
+    // Круг трения: тяга задней оси отъедает её боковую цепкость
+    const util = Math.abs(driveFx) / tR.D;
+    const rMul = 1 / Math.sqrt(1 + util * util * 0.9);
+
+    const FyF = -tireForce(aF, tF.B, tF.C, tF.D * sf, tF.E);
+    const FyR = -tireForce(aR, tR.B, tR.C, tR.D * sf * rMul, tR.E);
+
+    vLong += driveFx * dt;
+    vLat += (FyF * Math.cos(delta) + FyR) * dt;
+    car.w += ((P.AF * FyF * Math.cos(delta) - P.AR * FyR) / P.IZ) * dt;
+    car.w -= car.w * P.YAW_DAMP * sf * dt;
+
     vLong -= vLong * P.DRAG * dt;
     vLong -= sgn(vLong) * Math.min(Math.abs(vLong), P.ROLL * dt);
+    if (off) vLong *= Math.exp(-1.6 * dt);
     vLong = clamp(vLong, -P.MAX_REVERSE, P.MAX_SPEED);
-
-    // Сцепление задней оси: ручник резко снижает боковое сцепление,
-    // затем оно плавно восстанавливается — занос «докатывается».
-    const slipNow = Math.abs(Math.atan2(vLat, Math.abs(vLong) + 1));
-    const gripTarget = hb ? P.GRIP_HB : P.GRIP;
-    car.grip += (gripTarget - car.grip) *
-      (1 - Math.exp(-(hb ? P.GRIP_RATE_HB : P.GRIP_RATE) * dt));
-    let grip = car.grip;
-    if (throttle && speed > 280 && slipNow > 0.18) grip *= P.POWER_GRIP;
-    if (!onTrack) grip *= 0.78;
-    vLat *= Math.exp(-grip * dt);
-
-    // Трава/гравий сильно замедляют
-    if (!onTrack) {
-      vLong *= Math.exp(-1.6 * dt);
-      vLat *= Math.exp(-1.1 * dt);
-    }
-
-    // Поворот носа
-    const speedFactor = clamp(speed / 150, 0, 1) *
-      (1 - 0.22 * clamp(speed / 900, 0, 1));
-    const yawTarget = car.steer * P.YAW_MAX * speedFactor *
-      (hb ? P.YAW_HB : 1) * (vLong < -20 ? -1 : 1);
-    car.w += (yawTarget - car.w) * (1 - Math.exp(-P.YAW_RESPONSE * dt));
-
-    const slip = Math.atan2(vLat, Math.abs(vLong) + 1);
-    // Стабилизатор: не даём заносу превратиться в неуправляемый разворот
-    if (Math.abs(slip) > P.SLIP_LIMIT && sgn(slip) !== sgn(car.w)) {
-      car.w *= Math.exp(-Math.min(1, (Math.abs(slip) - P.SLIP_LIMIT) * 8) * 9 * dt);
-    }
-    const align = (hb ? P.ALIGN_HB : P.ALIGN) * speedFactor;
-    car.w += slip * align * dt;
     car.w = clamp(car.w, -P.MAX_YAW, P.MAX_YAW);
-
     car.angle = normAng(car.angle + car.w * dt);
 
-    // Вектор скорости остаётся в мировых координатах — нос и движение живут отдельно
     car.vx = vLong * ca - vLat * sa;
     car.vy = vLong * sa + vLat * ca;
     car.x += car.vx * dt;
     car.y += car.vy * dt;
+  }
+
+  function stepPhysics(dt) {
+    const P = PHYS;
+    const dirt = car.offTrack;
+    const h = dt / P.SUB;
+    for (let s = 0; s < P.SUB; s++) substep(h, dirt);
 
     // Положение относительно трассы
     const loc = locate(car.x, car.y, car.lastIdx);
@@ -1091,7 +1343,7 @@
       if (vn > 0) {
         car.vx -= 1.35 * vn * nx;
         car.vy -= 1.35 * vn * ny;
-        if (car.hitCd <= 0 && vn > 30) {
+        if (car.hitCd <= 0 && vn > P.MAX_SPEED * 0.08) {
           car.hitCd = 0.6;
           car.vx *= 0.72;
           car.vy *= 0.72;
@@ -1377,10 +1629,7 @@
     ctx.scale(zoom, zoom);
     ctx.translate(-cam.x, -cam.y);
 
-    // Бесконечная трава под прозрачным слоем мира
-    ctx.fillStyle = grassPat;
-    ctx.fillRect(cam.x - hw - 60, cam.y - hh - 60, hw * 2 + 120, hh * 2 + 120);
-
+    // Слой мира (бетонная площадка + разметка + здания) рисуется один раз
     ctx.drawImage(world, 0, 0);
     drawSkids(ctx, cam.x, cam.y, hw, hh);
     drawParticles(ctx);
@@ -1400,7 +1649,6 @@
     car.vy = 0;
     car.w = 0;
     car.steer = 0;
-    car.grip = PHYS.GRIP;
     car.hitCd = 0;
     car.offTrack = false;
     car.onTrack = true;
@@ -1480,6 +1728,7 @@
      Запуск
      ========================================================= */
   buildTrack();
+  buildWorld();
   resize();
   resetGame();
 

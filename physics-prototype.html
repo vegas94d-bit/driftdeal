@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>driftdeal — physics prototype</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#11151a;color:#e8edf2;font:14px system-ui,Segoe UI,sans-serif;overflow:hidden}
+#game{display:block;width:100vw;height:100vh;background:#22282c}
+#hud{position:fixed;left:18px;top:18px;padding:14px 16px;background:#111c;color:#eaf1f7;border:1px solid #3c4650;border-radius:10px;min-width:220px;box-shadow:0 6px 24px #0006}
+#hud h1{font-size:15px;margin:0 0 10px;color:#9fd5ff}#stats{line-height:1.75;font-variant-numeric:tabular-nums}#help{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#101820d9;border:1px solid #43505b;border-radius:9px;padding:10px 14px;color:#cbd5df;text-align:center;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"><h1>DRIFTDEAL · PHYSICS TEST</h1><div id="stats">Загрузка физики…</div></div>
+<div id="help">W / ↑ газ · S / ↓ тормоз · A / D руление · SPACE ручник · R сброс</div>
+<script src="https://cdn.jsdelivr.net/npm/planck@1.4.2/dist/planck.min.js"></script>
+<script>
+(() => {
+'use strict';
+const CONFIG = {
+  scale: 50,             // pixels per meter
+  carMass: 1200,
+  carLength: 4.2,        // m
+  carWidth: 1.8,        // m
+  engineForce: 12000,    // N
+  brakeForce: 10500,    // N
+  maxSteer: 0.58,       // radians at low speed
+  steerSpeed: 2.8,
+  steerReturn: 4.0,
+  frontGrip: 8.2,
+  rearGrip: 6.4,
+  frontMu: 1.08,
+  rearMu: 0.92,
+  handbrakeMu: 0.25,
+  rollingDrag: 30,
+  airDrag: 0.12,
+  maxSpeed: 58,          // m/s (~209 km/h)
+  fixedDt: 1/120
+};
+const pl = window.planck;
+if (!pl) { document.getElementById('stats').textContent = 'Не удалось загрузить Planck.js. Проверь интернет/CDN.'; return; }
+const world = new pl.World({gravity: pl.Vec2(0,0)});
+world.setAllowSleeping(false);
+const carBody = world.createBody({type:'dynamic', position:pl.Vec2(0,0), angle:0, linearDamping:0.0, angularDamping:0.12});
+carBody.createFixture(pl.Box(CONFIG.carLength/2, CONFIG.carWidth/2), {density:CONFIG.carMass/(CONFIG.carLength*CONFIG.carWidth), friction:0.1, restitution:0.0});
+// Wheel/contact points: front axle +x, rear axle -x; left/right are visual pairs.
+const frontAxle = CONFIG.carLength*0.34;
+const rearAxle = -CONFIG.carLength*0.34;
+const axleHalfWidth = CONFIG.carWidth*0.38;
+const canvas = document.getElementById('game'), ctx = canvas.getContext('2d');
+const keys = new Set();
+let steer = 0, handbrake = false, throttle = 0, brake = 0, accumulator = 0, lastTime = 0;
+  // === ДИАГНОСТИКА РАЗГОНА ===
+let camX=0,camY=0;
+function resize(){canvas.width=innerWidth*devicePixelRatio;canvas.height=innerHeight*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0)}
+addEventListener('resize',resize);resize();
+addEventListener('keydown',e=>{if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code))e.preventDefault();keys.add(e.code); if(e.code==='KeyR')resetCar();});
+addEventListener('keyup',e=>keys.delete(e.code));
+function resetCar(){carBody.setTransform(pl.Vec2(0,0),0);carBody.setLinearVelocity(pl.Vec2(0,0));carBody.setAngularVelocity(0);steer=0;}
+function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+function applyTire(axleX, steerAngle, grip, mu, isRear, dt){
+  const points=[pl.Vec2(axleX,axleHalfWidth),pl.Vec2(axleX,-axleHalfWidth)];
+  for(const local of points){
+    const worldPoint=carBody.getWorldPoint(local);
+    const vel=carBody.getLinearVelocityFromWorldPoint(worldPoint);
+    const wheelAngle=carBody.getAngle()+steerAngle;
+    const forward=pl.Vec2(Math.cos(wheelAngle),Math.sin(wheelAngle));
+    const side=pl.Vec2(-Math.sin(wheelAngle),Math.cos(wheelAngle));
+    const vLong=pl.Vec2.dot(vel,forward), vSide=pl.Vec2.dot(vel,side);
+    const massShare=CONFIG.carMass/4;
+    // Simple saturating lateral tire model; forces oppose local sideways motion.
+    const rawSide=-vSide*grip*massShare;
+    const maxSide=mu*massShare*9.81;
+    const sideForce=clamp(rawSide,-maxSide,maxSide);
+    carBody.applyForce(side.mul(sideForce),worldPoint,true);
+    if(isRear && throttle!==0){
+      const drive=throttle*CONFIG.engineForce/2;
+      carBody.applyForce(forward.mul(drive),worldPoint,true);
+    }
+    if(brake>0){
+      const braking=clamp(-vLong*massShare*12,-CONFIG.brakeForce/2,CONFIG.brakeForce/2)*brake;
+      carBody.applyForce(forward.mul(braking),worldPoint,true);
+    }
+    // Small rolling drag at each contact.
+    carBody.applyForce(forward.mul(-vLong*CONFIG.rollingDrag/4),worldPoint,true);
+  }
+}
+function updatePhysics(dt){
+  throttle=(keys.has('KeyW')||keys.has('ArrowUp'))?1:0;
+  brake=(keys.has('KeyS')||keys.has('ArrowDown'))?1:0;
+  handbrake=keys.has('Space');
+  const left=keys.has('KeyA')||keys.has('ArrowLeft'), right=keys.has('KeyD')||keys.has('ArrowRight');
+  const steerInput=(right?1:0)-(left?1:0);
+  const speed=carBody.getLinearVelocity().length();
+  const steerLimit=CONFIG.maxSteer/(1+speed*0.035);
+  const target=steerInput*steerLimit;
+  steer += clamp(target-steer,-CONFIG.steerSpeed*dt,CONFIG.steerSpeed*dt);
+  if(!steerInput)steer += clamp(-steer,-CONFIG.steerReturn*dt,CONFIG.steerReturn*dt);
+  // Front tire forces steer with wheel angle; rear axle remains aligned with chassis.
+  applyTire(frontAxle,steer,CONFIG.frontGrip,CONFIG.frontMu,false,dt);
+  applyTire(rearAxle,0,CONFIG.rearGrip,handbrake?CONFIG.handbrakeMu:CONFIG.rearMu,true,dt);
+  // Air resistance applied to whole body.
+  const v=carBody.getLinearVelocity();
+  carBody.applyForce(v.clone().mul(-CONFIG.airDrag*v.length()),carBody.getWorldCenter(),true);
+  if(v.length()>CONFIG.maxSpeed)carBody.setLinearVelocity(v.clone().mul(CONFIG.maxSpeed/v.length()));
+  world.step(dt,8,3);
+}
+function drawGround(){
+  const w=innerWidth,h=innerHeight;
+  ctx.fillStyle='#252b2e';ctx.fillRect(0,0,w,h);
+  const grid=100,ox=((w/2-camX*CONFIG.scale)%grid+grid)%grid,oy=((h/2+camY*CONFIG.scale)%grid+grid)%grid;
+  ctx.strokeStyle='#30383c';ctx.lineWidth=1;ctx.beginPath();
+  for(let x=ox;x<w;x+=grid){ctx.moveTo(x,0);ctx.lineTo(x,h)}
+  for(let y=oy;y<h;y+=grid){ctx.moveTo(0,y);ctx.lineTo(w,y)}ctx.stroke();
+  ctx.strokeStyle='#465156';ctx.lineWidth=2;ctx.strokeRect(w/2-camX*CONFIG.scale-5000,h/2+camY*CONFIG.scale-5000,10000,10000);
+}
+function drawCar(){
+  const p=carBody.getPosition(),angle=carBody.getAngle();
+  const x=innerWidth/2+(p.x-camX)*CONFIG.scale,y=innerHeight/2-(p.y-camY)*CONFIG.scale;
+  ctx.save();ctx.translate(x,y);ctx.rotate(-angle);
+  const L=CONFIG.carLength*CONFIG.scale,W=CONFIG.carWidth*CONFIG.scale;
+  // shadow
+  ctx.fillStyle='#0005';ctx.fillRect(-L/2+4,-W/2+6,L,W);
+  // tires
+  const tireL=CONFIG.scale*0.72,tireW=CONFIG.scale*0.28;
+  for(const ax of [frontAxle,rearAxle])for(const side of [-1,1]){
+    const wx=ax*CONFIG.scale,wy=side*axleHalfWidth*CONFIG.scale;
+    ctx.save();ctx.translate(wx,wy);if(ax===frontAxle)ctx.rotate(-steer);
+    ctx.fillStyle='#090b0d';ctx.fillRect(-tireL/2,-tireW/2,tireL,tireW);ctx.restore();
+  }
+  // body
+  ctx.fillStyle='#45a6d9';ctx.strokeStyle='#c9e8f7';ctx.lineWidth=2;ctx.beginPath();ctx.roundRect(-L/2,-W/2,L,W,CONFIG.scale*0.18);ctx.fill();ctx.stroke();
+  // hood / cabin / windshield
+  ctx.fillStyle='#2378a8';ctx.fillRect(L*0.12,-W*0.34,L*0.26,W*0.68);
+  ctx.fillStyle='#172c3a';ctx.beginPath();ctx.roundRect(-L*0.16,-W*0.31,L*0.34,W*0.62,5);ctx.fill();
+  ctx.fillStyle='#8fd5f3';ctx.fillRect(L*0.18,-W*0.27,L*0.08,W*0.54);
+  // front marker
+  ctx.fillStyle='#f6f1c8';ctx.fillRect(L/2-5,-W*0.34,5,W*0.18);ctx.fillRect(L/2-5,W*0.16,5,W*0.18);
+  ctx.fillStyle='#ff5261';ctx.fillRect(-L/2,-W*0.34,6,W*0.18);ctx.fillRect(-L/2,W*0.16,6,W*0.18);
+  ctx.restore();
+}
+function render(){const p=carBody.getPosition();camX+=(p.x-camX)*0.08;camY+=(p.y-camY)*0.08;drawGround();drawCar();
+  const v=carBody.getLinearVelocity(),speed=v.length(),a=carBody.getAngle(),forward=pl.Vec2(Math.cos(a),Math.sin(a)),side=pl.Vec2(-Math.sin(a),Math.cos(a));
+  const vLong=pl.Vec2.dot(v,forward),vLat=pl.Vec2.dot(v,side),slip=Math.atan2(vLat,Math.max(Math.abs(vLong),0.5))*180/Math.PI;
+  document.getElementById('stats').innerHTML=`<div>Скорость: <b>${(speed*3.6).toFixed(0)} км/ч</b></div><div>Скольжение: <b>${slip.toFixed(1)}°</b></div><div>Руль: <b>${(steer*180/Math.PI).toFixed(1)}°</b></div><div>Режим: <b>${Math.abs(slip)>12&&speed>5?'ЗАНОС':handbrake?'РУЧНИК':'ДВИЖЕНИЕ'}</b></div><div>Газ: ${throttle?'●':'○'} &nbsp; Тормоз: ${brake?'●':'○'}</div>`;
+}
+function loop(t){if(!lastTime)lastTime=t;let frameDt=Math.min((t-lastTime)/1000,0.05);lastTime=t;accumulator+=frameDt;while(accumulator>=CONFIG.fixedDt){updatePhysics(CONFIG.fixedDt);accumulator-=CONFIG.fixedDt;}render();requestAnimationFrame(loop);}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+
+
+
